@@ -1,0 +1,42 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Log in</title>
+<link rel="stylesheet" href="/style.css">
+
+<form id="login" novalidate>
+  <h1>Log in</h1>
+
+  <label>Email <input name="email"></label>
+  <label>Password <input name="password" type="password"></label>
+
+  <button type="submit">Log in</button>
+  <p class="error" data-for="form"></p>
+  <p>No account? <a href="/signup.html">Sign up</a>.</p>
+</form>
+
+<script>
+  const form = document.getElementById("login");
+  const error = form.querySelector(".error");
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    error.textContent = "";
+    const values = Object.fromEntries(new FormData(form));
+
+    const response = await fetch("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: values.email.trim(), password: values.password }),
+    });
+
+    if (response.ok) {
+      // The session cookie is HttpOnly, so the browser holds it from here on
+      // and the dashboard just asks the server who it is talking to.
+      window.location.href = "/dashboard.html";
+    } else if (response.status === 429) {
+      error.textContent = `Too many attempts. Try again in ${response.headers.get("Retry-After")}s.`;
+    } else {
+      error.textContent = "Invalid email or password.";
+    }
+  });
+</script>

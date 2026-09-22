@@ -5,8 +5,10 @@ from __future__ import annotations
 import os
 import time
 from collections import defaultdict
+from datetime import datetime
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, EmailStr
 
 from src.auth import (
@@ -26,7 +28,7 @@ MAX_ATTEMPTS = int(os.environ.get("LOGIN_MAX_ATTEMPTS", "5"))
 WINDOW_SECONDS = int(os.environ.get("LOGIN_WINDOW_MINUTES", "15")) * 60
 
 app = FastAPI(title="auth-api")
-db = connect(os.environ.get("AUTH_DB_PATH", "./auth.db"))
+db = connect()
 
 # Failed login timestamps per (email, client IP). bcrypt is deliberately slow,
 # so an unthrottled login endpoint is also the cheapest way to burn our CPU.
@@ -38,10 +40,16 @@ class Credentials(BaseModel):
     password: str
 
 
+class SignupRequest(Credentials):
+    name: str
+    confirm_password: str
+
+
 class Account(BaseModel):
     id: int
+    name: str
     email: str
-    created_at: str
+    created_at: datetime
 
 
 def current_user(request: Request) -> User:
@@ -52,9 +60,13 @@ def current_user(request: Request) -> User:
 
 
 @app.post("/api/auth/signup", status_code=201, response_model=Account)
-def signup(body: Credentials) -> User:
+def signup(body: SignupRequest) -> User:
+    """Create an account. The browser checks these rules too, but the server
+    is the one that decides, so every one of them is re-checked here."""
+    if body.confirm_password != body.password:
+        raise HTTPException(status_code=400, detail="passwords do not match")
     try:
-        return create_user(db, body.email, body.password)
+        return create_user(db, body.name, body.email, body.password)
     except AuthError as exc:
         status = 409 if "registered" in str(exc) else 400
         raise HTTPException(status_code=status, detail=str(exc)) from None
@@ -113,3 +125,8 @@ def _throttled_for(key: tuple[str, str]) -> int:
     if len(recent) < MAX_ATTEMPTS:
         return 0
     return max(1, int(WINDOW_SECONDS - (now - recent[0])))
+
+
+# Served last so the API routes above win: the signup, login and dashboard
+# pages the browser loads.
+app.mount("/", StaticFiles(directory="web", html=True), name="web")
