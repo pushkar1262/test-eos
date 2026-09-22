@@ -1,0 +1,27 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Dashboard</title>
+<link rel="stylesheet" href="/style.css">
+
+<main>
+  <h1>Dashboard</h1>
+  <p id="greeting">Loading…</p>
+  <button id="logout">Log out</button>
+</main>
+
+<script>
+  (async () => {
+    const response = await fetch("/api/auth/me");
+    if (response.status === 401) {
+      window.location.href = "/login.html";
+      return;
+    }
+    const account = await response.json();
+    document.getElementById("greeting").textContent = `Signed in as ${account.name} (${account.email}).`;
+  })();
+
+  document.getElementById("logout").addEventListener("click", async () => {
+    await fetch("/api/auth/logout", { method: "POST" });
+    window.location.href = "/login.html";
+  });
+</script>
