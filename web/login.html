@@ -1,0 +1,43 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Log in</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 3rem auto; max-width: 22rem; }
+  label { display: block; margin-top: 1rem; }
+  input { display: block; width: 100%; padding: 0.4rem; margin-top: 0.25rem; }
+  button { margin-top: 1.5rem; padding: 0.5rem 1rem; }
+  .error { color: #b00020; font-size: 0.85rem; }
+</style>
+
+<form id="login">
+  <h1>Log in</h1>
+  <label>Email <input name="email" type="email" required></label>
+  <label>Password <input name="password" type="password" required></label>
+  <button type="submit">Log in</button>
+  <p class="error"></p>
+</form>
+
+<script>
+  const form = document.getElementById("login");
+  const error = form.querySelector(".error");
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    error.textContent = "";
+    const values = Object.fromEntries(new FormData(form));
+
+    const response = await fetch("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: values.email.trim(), password: values.password }),
+    });
+
+    if (response.ok) {
+      // The session cookie is HttpOnly, so the browser carries it from here and
+      // the dashboard asks the server who it is talking to.
+      window.location.href = "/dashboard.html";
+    } else {
+      error.textContent = "Invalid email or password.";
+    }
+  });
+</script>
