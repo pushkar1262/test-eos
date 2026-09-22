@@ -20,6 +20,9 @@ jobs:
           --health-timeout 5s --health-retries 5
     env:
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/authdb
+      # The deployed cost factor is 12; 10 is the floor the requirement sets and
+      # keeps the suite from spending all its time in key stretching.
+      BCRYPT_ROUNDS: "10"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

@@ -1,0 +1,31 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Dashboard</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 3rem auto; max-width: 22rem; }
+  button { margin-top: 1.5rem; padding: 0.5rem 1rem; }
+</style>
+
+<h1>Dashboard</h1>
+<p id="greeting">Loading…</p>
+<button id="logout">Log out</button>
+
+<script>
+  (async () => {
+    const response = await fetch("/api/auth/me");
+    if (response.status === 401) {
+      window.location.href = "/login.html";
+      return;
+    }
+    const account = await response.json();
+    document.getElementById("greeting").textContent =
+      `Signed in as ${account.name} (${account.email}).`;
+  })();
+
+  document.getElementById("logout").addEventListener("click", async () => {
+    // The server deletes the session row and expires the cookie; after this the
+    // same page load gets a 401.
+    await fetch("/api/auth/logout", { method: "POST" });
+    window.location.href = "/login.html";
+  });
+</script>
