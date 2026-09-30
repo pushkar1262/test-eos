@@ -1,0 +1,207 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Conversations</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem; }
+  .error { color: #b00020; }
+  .row { display: flex; gap: 1rem; align-items: flex-start; }
+  .column { flex: 1; background: #f4f4f4; padding: 0.5rem; min-height: 6rem; }
+  .card { background: #fff; border: 1px solid #ccc; padding: 0.5rem; margin: 0.25rem 0; cursor: pointer; }
+  .selected { outline: 2px solid #1a73e8; }
+  table { border-collapse: collapse; width: 100%; }
+  td, th { text-align: left; padding: 0.3rem; border-bottom: 1px solid #ddd; }
+  #detail { flex: 1; }
+  .message { border-bottom: 1px solid #eee; padding: 0.4rem 0; }
+  .meta { color: #555; font-size: 0.85rem; }
+</style>
+
+<section id="connection">
+  <p id="connection-state">Loading…</p>
+  <form id="connect" hidden>
+    <input name="account_sid" placeholder="Twilio Account SID" required>
+    <input name="auth_token" type="password" placeholder="Auth Token" required>
+    <button type="submit">Connect</button>
+  </form>
+  <button id="disconnect" hidden>Disconnect</button>
+  <p class="error" id="connection-error"></p>
+</section>
+
+<p>
+  <button data-view="board">Board</button>
+  <button data-view="list">List</button>
+</p>
+
+<div class="row">
+  <div id="conversations"></div>
+  <section id="detail" hidden>
+    <h2 id="detail-title"></h2>
+    <label>Status
+      <select id="status">
+        <option value="open">Open</option>
+        <option value="in_progress">In Progress</option>
+        <option value="resolved">Resolved</option>
+      </select>
+    </label>
+    <div id="messages"></div>
+  </section>
+</div>
+
+<script>
+  const STATUSES = { open: "Open", in_progress: "In Progress", resolved: "Resolved" };
+  // One source of truth for both views, so switching views never resets the
+  // selection (REQ-002).
+  const state = { view: "board", selectedId: null, conversations: new Map(), since: null, connection: null };
+  const $ = (id) => document.getElementById(id);
+
+  function el(tag, text, className) {
+    const node = document.createElement(tag);
+    if (text !== undefined) node.textContent = text;
+    if (className) node.className = className;
+    return node;
+  }
+
+  function renderConnection() {
+    const c = state.connection;
+    const connected = c?.state === "connected";
+    $("connection-state").textContent = connected ? `Connected to Twilio (${c.account_sid})` : "Disconnected";
+    $("connect").hidden = connected;
+    $("disconnect").hidden = !connected;
+  }
+
+  function select(id) {
+    state.selectedId = id;
+    renderConversations();
+    loadMessages();
+  }
+
+  function card(conversation, tag) {
+    const node = el(tag, undefined, conversation.id === state.selectedId ? "selected" : "");
+    node.dataset.id = conversation.id;
+    node.onclick = () => select(conversation.id);
+    return node;
+  }
+
+  function renderConversations() {
+    const container = $("conversations");
+    container.replaceChildren();
+    container.style.flex = "2";
+    const all = [...state.conversations.values()];
+    if (state.view === "board") {
+      const row = el("div", undefined, "row");
+      for (const [status, label] of Object.entries(STATUSES)) {
+        const column = el("div", undefined, "column");
+        column.append(el("h3", label));
+        for (const c of all.filter((c) => c.status === status)) {
+          const node = card(c, "div");
+          node.classList.add("card");
+          node.textContent = c.title;
+          column.append(node);
+        }
+        row.append(column);
+      }
+      container.append(row);
+    } else {
+      const table = el("table");
+      table.append(el("tr"));
+      table.firstChild.append(el("th", "Conversation"), el("th", "Status"));
+      for (const c of all) {
+        const tr = card(c, "tr");
+        tr.append(el("td", c.title), el("td", STATUSES[c.status]));
+        table.append(tr);
+      }
+      container.append(table);
+    }
+    const selected = state.conversations.get(state.selectedId);
+    $("detail").hidden = !selected;
+    if (selected) {
+      $("detail-title").textContent = selected.title;
+      $("status").value = selected.status;
+    }
+  }
+
+  async function loadMessages() {
+    if (!state.selectedId) return;
+    const id = state.selectedId;
+    const messages = await (await fetch(`/api/conversations/${id}/messages`)).json();
+    if (id !== state.selectedId) return;  // the user picked another one meanwhile
+    // REQ-003: sender, receiver, content, timestamp and status on every message.
+    $("messages").replaceChildren(...messages.map((m) => {
+      const node = el("div", undefined, "message");
+      node.append(
+        el("div", `${m.sender} → ${m.receiver}`, "meta"),
+        el("div", m.content),
+        el("div", `${new Date(m.sent_at).toLocaleString()} · ${m.status}`, "meta"),
+      );
+      return node;
+    }));
+  }
+
+  // REQ-002: new conversations appear without a page refresh.
+  async function poll() {
+    const query = state.since ? `?since=${encodeURIComponent(state.since)}` : "";
+    const [connection, changed] = await Promise.all([
+      fetch("/api/connection").then((r) => r.json()),
+      fetch(`/api/conversations${query}`).then((r) => r.json()),
+    ]);
+    state.connection = connection;
+    for (const c of changed) {
+      state.conversations.set(c.id, c);
+      state.since = c.updated_at;
+    }
+    renderConnection();
+    renderConversations();
+    loadMessages();
+  }
+
+  document.querySelectorAll("[data-view]").forEach((button) => {
+    button.onclick = () => { state.view = button.dataset.view; renderConversations(); };
+  });
+
+  // REQ-005: the new status shows at once; the request catches up behind it.
+  $("status").onchange = async (event) => {
+    const conversation = state.conversations.get(state.selectedId);
+    const previous = conversation.status;
+    conversation.status = event.target.value;
+    renderConversations();
+    const response = await fetch(`/api/conversations/${conversation.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status: conversation.status }),
+    });
+    if (!response.ok) {
+      conversation.status = previous;
+      renderConversations();
+    }
+  };
+
+  // REQ-001: a failed attempt shows Twilio's error and leaves the board disconnected.
+  $("connect").onsubmit = async (event) => {
+    event.preventDefault();
+    $("connection-error").textContent = "";
+    const response = await fetch("/api/connection", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(Object.fromEntries(new FormData(event.target))),
+    });
+    const body = await response.json();
+    if (response.ok) {
+      state.connection = body;
+      event.target.reset();
+    } else {
+      state.connection = null;
+      $("connection-error").textContent = body.detail;
+    }
+    renderConnection();
+  };
+
+  // REQ-001: disconnecting cancels in-flight sends and reverts the board.
+  $("disconnect").onclick = async () => {
+    await fetch(`/api/connection/${state.connection.id}/disconnect`, { method: "POST" });
+    state.connection = { ...state.connection, state: "disconnected" };
+    renderConnection();
+    loadMessages();
+  };
+
+  poll();
+  setInterval(poll, 3000);
+</script>
