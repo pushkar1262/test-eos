@@ -76,6 +76,15 @@ def record_connection(
     return Connection(**row)
 
 
+def current_connection(db: psycopg.Connection) -> Connection | None:
+    """The most recent connect attempt, which is what the board shows."""
+    row = db.execute(
+        "SELECT id, account_sid, state, last_error FROM connections"
+        " ORDER BY greatest(created_at, connected_at, disconnected_at) DESC LIMIT 1"
+    ).fetchone()
+    return Connection(**row) if row else None
+
+
 def disconnect(db: psycopg.Connection, connection_id: UUID) -> int:
     """REQ-001: mark the connection disconnected and cancel its in-flight sends.
 
@@ -172,6 +181,32 @@ def update_message_status(db: psycopg.Connection, message_id: UUID, status: str)
         "UPDATE messages SET status = %s WHERE id = %s AND status <> 'canceled'",
         (status, message_id),
     ).rowcount > 0
+
+
+def record_inbound_message(
+    db: psycopg.Connection,
+    conversation_sid: str,
+    external_sid: str,
+    sender: str,
+    receiver: str,
+    content: str,
+    sent_at: datetime,
+) -> bool:
+    """A message received through Twilio. A replayed event inserts nothing."""
+    with db.transaction():
+        inserted = db.execute(
+            "INSERT INTO messages"
+            " (conversation_id, external_sid, sender, receiver, content, status, sent_at)"
+            " SELECT id, %s, %s, %s, %s, 'delivered', %s FROM conversations WHERE external_sid = %s"
+            " ON CONFLICT (external_sid) DO NOTHING",
+            (external_sid, sender, receiver, content, sent_at, conversation_sid),
+        ).rowcount > 0
+        # Bumping updated_at puts the conversation in the board's next poll.
+        db.execute(
+            "UPDATE conversations SET updated_at = now() WHERE external_sid = %s AND %s",
+            (conversation_sid, inserted),
+        )
+    return inserted
 
 
 def message_history(db: psycopg.Connection, conversation_id: UUID) -> list[Message]:
