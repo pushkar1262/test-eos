@@ -1,4 +1,4 @@
-"""Connection handling and migrations for auth-db.
+"""Connection handling and migrations for board-db.
 
 Migrations are plain .sql files applied in filename order and recorded in
 schema_migrations, so running this against an up-to-date database is a no-op
@@ -14,7 +14,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 DATABASE_URL = os.environ.get(
-    "DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/authdb"
+    "DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/boarddb"
 )
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 

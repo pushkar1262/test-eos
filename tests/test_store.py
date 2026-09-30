@@ -1,21 +1,21 @@
-from datetime import datetime, timedelta, timezone
-from uuid import UUID
-
 import psycopg
 import pytest
 
 from src.db import connect, migrate
 from src.store import (
-    EmailTaken,
-    create_session,
-    create_user,
-    delete_expired_sessions,
-    delete_session,
-    session_user,
-    verify_password,
+    InvalidStatus,
+    NotConnected,
+    conversations_since,
+    disconnect,
+    mark_published,
+    message_history,
+    queue_message,
+    record_connection,
+    set_conversation_status,
+    unpublished_events,
+    update_message_status,
+    upsert_conversation,
 )
-
-PASSWORD = "correct-horse"
 
 
 @pytest.fixture(scope="session")
@@ -28,102 +28,105 @@ def db():
 
 @pytest.fixture(autouse=True)
 def clean(db):
-    db.execute("TRUNCATE users, sessions")
+    db.execute("TRUNCATE connections, conversations, messages, outbox_events")
 
 
-def user(db, name="Ada", email="ada@example.com", password=PASSWORD):
-    return create_user(db, name, email, password)
+def conversation(db):
+    connection = record_connection(db, "AC123")
+    return upsert_conversation(db, connection.id, "CH1", "Ada Lovelace")
+
+
+def topics(db):
+    return [row["topic"] for row in db.execute("SELECT topic FROM outbox_events ORDER BY id")]
 
 
 def test_migrations_are_idempotent(db):
-    # A second run against an up-to-date database applies nothing.
     assert migrate(db) == []
 
 
-def test_user_gets_a_uuid_key_and_timestamp(db):
-    created = user(db)
-    assert isinstance(created.id, UUID)
-    assert created.created_at <= datetime.now(timezone.utc)
+def test_connect_succeeds(db):
+    connection = record_connection(db, "AC123")
+    assert connection.state == "connected" and connection.last_error is None
 
 
-def test_duplicate_email_is_rejected_by_the_constraint(db):
-    user(db)
-    with pytest.raises(EmailTaken):
-        user(db, email="ADA@example.com")
+def test_failed_connect_keeps_the_error_and_is_not_connected(db):
+    record_connection(db, "AC123")
+    failed = record_connection(db, "AC123", error="Authentication failed")
+    assert failed.state == "failed"
+    assert failed.last_error == "Authentication failed"
 
 
-def test_password_is_stored_as_a_bcrypt_hash(db):
-    created = user(db)
-    row = db.execute(
-        "SELECT password_hash FROM users WHERE id = %s", (created.id,)
-    ).fetchone()
-    stored = row["password_hash"]
-    assert stored.startswith("$2b$")
-    assert PASSWORD not in stored
-    assert int(stored.split("$")[2]) >= 10
+def test_disconnect_cancels_in_flight_sends(db):
+    convo = conversation(db)
+    in_flight = queue_message(db, convo.id, "+15550001", "+15550002", "hi")
+    delivered = queue_message(db, convo.id, "+15550001", "+15550002", "earlier")
+    update_message_status(db, delivered.id, "delivered")
+
+    assert disconnect(db, convo.connection_id) == 1
+    statuses = {m.id: m.status for m in message_history(db, convo.id)}
+    assert statuses == {in_flight.id: "canceled", delivered.id: "delivered"}
+    assert db.execute("SELECT state FROM connections").fetchone()["state"] == "disconnected"
+    # A late delivery report does not resurrect the canceled send.
+    assert update_message_status(db, in_flight.id, "sent") is False
 
 
-def test_credentials_are_checked_against_the_hash(db):
-    created = user(db)
-    assert verify_password(db, "ada@example.com", PASSWORD).id == created.id
-    assert verify_password(db, "ada@example.com", "wrong-password") is None
-    assert verify_password(db, "nobody@example.com", PASSWORD) is None
+def test_no_sends_once_disconnected(db):
+    convo = conversation(db)
+    disconnect(db, convo.connection_id)
+    with pytest.raises(NotConnected):
+        queue_message(db, convo.id, "+15550001", "+15550002", "hi")
 
 
-def test_session_stores_only_the_token_digest(db):
-    created = user(db)
-    session, token = create_session(db, created.id)
-    row = db.execute(
-        "SELECT token_hash FROM sessions WHERE id = %s", (session.id,)
-    ).fetchone()
-    assert row["token_hash"] != token
-    assert session_user(db, token).id == created.id
+def test_new_conversations_show_up_in_the_next_poll(db):
+    first = conversation(db)
+    since = conversations_since(db)[-1].updated_at
+    assert conversations_since(db, since) == []
+    second = upsert_conversation(db, first.connection_id, "CH2", "Grace Hopper")
+    assert [c.id for c in conversations_since(db, since)] == [second.id]
 
 
-def test_token_hash_is_unique(db):
-    created = user(db)
-    _, token = create_session(db, created.id)
-    duplicate = db.execute(
-        "SELECT token_hash FROM sessions LIMIT 1"
-    ).fetchone()["token_hash"]
-    with pytest.raises(psycopg.errors.UniqueViolation):
-        db.execute(
-            "INSERT INTO sessions (user_id, token_hash, expires_at)"
-            " VALUES (%s, %s, now() + interval '1 hour')",
-            (created.id, duplicate),
-        )
-    assert session_user(db, token).id == created.id
+def test_replayed_conversation_event_does_not_duplicate(db):
+    first = conversation(db)
+    again = upsert_conversation(db, first.connection_id, "CH1", "Ada Lovelace")
+    assert again.id == first.id
 
 
-def test_session_requires_a_real_user(db):
-    with pytest.raises(psycopg.errors.ForeignKeyViolation):
-        db.execute(
-            "INSERT INTO sessions (user_id, token_hash, expires_at)"
-            " VALUES (gen_random_uuid(), 'orphan', now() + interval '1 hour')"
-        )
-
-
-def test_deleting_a_user_deletes_their_sessions(db):
-    created = user(db)
-    create_session(db, created.id)
-    db.execute("DELETE FROM users WHERE id = %s", (created.id,))
-    assert db.execute("SELECT count(*) AS n FROM sessions").fetchone()["n"] == 0
-
-
-def test_logout_deletes_the_session(db):
-    created = user(db)
-    _, token = create_session(db, created.id)
-    assert delete_session(db, token) is True
-    assert session_user(db, token) is None
-    assert delete_session(db, token) is False
-
-
-def test_expired_sessions_buy_nothing_and_are_cleaned_up(db):
-    created = user(db)
-    _, token = create_session(db, created.id)
-    db.execute(
-        "UPDATE sessions SET expires_at = %s",
-        (datetime.now(timezone.utc) - timedelta(seconds=1),),
+def test_message_history_has_the_displayed_fields(db):
+    convo = conversation(db)
+    queue_message(db, convo.id, "+15550001", "+15550002", "hello")
+    [message] = message_history(db, convo.id)
+    assert (message.sender, message.receiver, message.content, message.status) == (
+        "+15550001", "+15550002", "hello", "queued",
     )
-    assert session_user(db, token) is None
-    assert delete_expired_sessions(db) == 0  # session_user already removed it
+    assert message.sent_at is not None
+
+
+def test_status_changes_between_the_defined_values(db):
+    convo = conversation(db)
+    assert convo.status == "open"
+    assert set_conversation_status(db, convo.id, "resolved").status == "resolved"
+    with pytest.raises(InvalidStatus):
+        set_conversation_status(db, convo.id, "closed")
+
+
+def test_the_database_rejects_undefined_statuses(db):
+    convo = conversation(db)
+    with pytest.raises(psycopg.errors.InvalidTextRepresentation):
+        db.execute("UPDATE conversations SET status = 'closed' WHERE id = %s", (convo.id,))
+
+
+def test_changes_write_outbox_events_for_the_relay(db):
+    convo = conversation(db)
+    queue_message(db, convo.id, "+15550001", "+15550002", "hi")
+    set_conversation_status(db, convo.id, "in_progress")
+    disconnect(db, convo.connection_id)
+    assert topics(db) == [
+        "message.send_requested",
+        "conversation.status_changed",
+        "connection.disconnected",
+    ]
+
+    with db.transaction():
+        batch = unpublished_events(db)
+        mark_published(db, [event["id"] for event in batch])
+    assert unpublished_events(db) == []
